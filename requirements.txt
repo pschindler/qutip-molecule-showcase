@@ -1,0 +1,6 @@
+numpy
+matplotlib
+qutip
+scippy
+seaborn
+scipy

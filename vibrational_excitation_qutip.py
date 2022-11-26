@@ -1,0 +1,208 @@
+from pylab import *
+from qutip import *
+import moltools
+import scipy.constants as consts
+import seaborn as sns
+
+sns.set_context("poster")
+
+"""Tools to simulate vibrational spectra given a text file with vibrational mode information 
+from the DFT simulation performed with Gaussian.
+"""
+
+DATAPATH = 'data/'
+
+no_points = 100
+scale_fac = 0.97
+
+
+def read_vibration(fname):
+    """Read frequencies from Gaussian formatted vibration results"""
+    a = open(fname)
+    b = a.readlines()
+    c = [line.split() for line in b]
+    vib_arr = array(array(c).astype(float))
+    vib_arr[:, 1] = vib_arr[:, 1] * scale_fac
+    return (vib_arr[6:, [1, 2]])
+
+
+class FullSpectrum:
+    """Calculates the spectrum of a single pulse including higher order terms
+    This is not performing any numerical simulation whatsoever, it only takes the DFT
+    transitions frequencies and transition strengths
+
+    TODO: How is the strength of higher order terms calculated?
+
+    Parameters:
+        vibname: Path and name of the datafile to be read
+    """
+
+    def __init__(self, vibname=DATAPATH + 'cyano_modes.txt'):
+        self.vib_array = read_vibration(vibname)
+        self.plot_vib()
+
+    def plot_vib(self):
+        """Plot the vibrational spectrum"""
+        lim_plot = 0
+        n_modes = self.vib_array.shape[0]
+        scale = 1 / max(self.vib_array[:, 1] ** 2)
+        ticklist = []
+        figure(figsize=(15, 10))
+        for i in range(n_modes):
+            freq = self.vib_array[i, 0]
+            d = self.vib_array[i, 1] ** 2 * scale
+            # d = 1
+            plot([freq, freq], [0, d], 'r', linewidth=4)
+            text(freq, d * 1, str(n_modes - i), rotation=45)
+            ticklist.append([freq,str(i)])
+            for j in range(i, n_modes):
+                freq1 = self.vib_array[j, 0]
+                d1 = d * self.vib_array[j, 1] ** 2 * scale
+                # d1 = 1
+                plot([freq + freq1, freq + freq1], [0, d1], 'g', linewidth=4)
+                if d1 > lim_plot:
+                    text(freq + freq1, d1 * 1, str(n_modes - i) + '+' + str(n_modes - j), rotation=45)
+                ticklist.append([freq+freq1,str(i) + '+' + str(j)])
+                if freq != freq1:
+                    plot([abs(freq - freq1), abs(freq - freq1)], [0, d1], 'b', linewidth=4)
+                    if d1 > lim_plot:
+                        text(abs(freq - freq1), d1 * 1, str(n_modes - j) + '-' + str(n_modes - i), rotation=45)
+                    ticklist.append([abs(freq-freq1),str(j) + '-' + str(i)])
+        ticklist = array(ticklist)
+        xticks(ticklist[:,0].astype(float),ticklist[:,1],rotation=45,size=5)
+        xlabel('Frequency (cm$^{-1}$)')
+        ylabel('Spin flip probability')
+        show()
+
+
+class DynamicSim:
+    """Simulates expected spectrum for a single molecule 
+    with given cat state size, coherence, intensity
+
+    The molecule is modelled as multiple harmonic oscillators
+
+    TODO: make physical parameters parameters of python function
+
+    Parameters:
+        vibname: Path and name of the datafile to be read
+        pdfname: Name of the pdf to be created
+        points: number of points for the spectrum
+        mass: Mass of combined atom and molecules in Dalton
+    """
+    osc_size = 4
+    alpha = 30
+    coherence = .45
+    I = 100e-11 / 1e-12 * (1 / 20e-6) ** 2
+
+    # w0 = np.array([3467,2270,1881])*0.02998 #Freq in THz
+    # d_list = [0.17,0.008,0.5]
+
+    def __init__(self, vibname=DATAPATH + 'cyano_modes.txt', pdfname='absorption_cyano_spin.pdf', points=50,
+                 mass=40 + 51):
+        self.mass = mass
+        self.pdfname = pdfname
+        self.omega_trap = 2 * pi * 500e3
+        self.vib_array = read_vibration(vibname)
+        d_list = self.vib_array[:, 1]
+        self.transitions = self.vib_array[:, 0] * 0.02998
+        self.delta_list = linspace(1000, 4000, points) * 0.02998
+        zlist = []
+        self.rabi_freq = [moltools.get_rabi_freq(self.I, d0) * 1e-12 for d0 in d_list]  # in THz
+        for delta in self.delta_list:
+            exp_list = self.solve_hamil(delta)
+            zlist.append([max(expectation) for expectation in exp_list])
+        # zlist=(1-np.array(zlist))/2.0
+        zlist = np.array(zlist)
+        print("zlist: {}".format(zlist))
+        self.zlist = zlist
+        self.exc_list = self.coherence * sin(2 * self.alpha * self.eta * np.sqrt(np.sum(zlist, 1))) ** 2
+        self.plot()
+
+    def plot(self):
+        """"Plot the spectrum"""
+        figure()
+        for i in range(self.zlist.shape[1]):
+            plot(self.delta_list, self.zlist[:, i])
+        figure()
+        plot(self.delta_list / 0.02998, self.exc_list)
+        scale = max(self.exc_list) / max(self.vib_array[:, 1] ** 2)
+        for i in range(self.vib_array.shape[0]):
+            freq = self.vib_array[i, 0]
+            d = self.vib_array[i, 1] ** 2 * scale
+            plot([freq, freq], [0, d], 'r', linewidth=4)
+        xlabel('Frequency (cm$^{-1}$)')
+        ylabel('Spin flip probability')
+        xlim([min(self.delta_list / 0.02998), max(self.delta_list / 0.02998)])
+        tight_layout()
+        savefig(self.pdfname)
+        # plot(tlist,exp_z0,'x')
+        # plot(tlist,exp_z1)            
+        show()
+
+    def solve_hamil(self, delta):
+        """Solve the Hamiltonian for a given detuning delta
+
+        Parameters:
+            delta: Detuning in THz
+        """
+        k_vector = 2 * pi / (consts.c / (delta * 1e12))
+        omega_recoil = consts.hbar * k_vector ** 2 / (2 * self.mass * consts.atomic_mass)
+        self.eta = sqrt(omega_recoil / self.omega_trap)
+
+        interact = position(self.osc_size)
+        a = destroy(self.osc_size)
+        exp_list = []
+        for n_i in range(self.transitions.shape[0]):
+            w = self.transitions[n_i]
+            g = self.rabi_freq[n_i]
+            tlist = np.linspace(0, 0.2 * 2 * pi, 100)
+
+            def prefactor(t, args):
+                return g * np.exp(-1j * delta * t)
+
+            H0 = w * a * a.dag()
+            H = [H0, [interact, prefactor]]
+            psi0 = basis(self.osc_size, 0)
+            result = mesolve(H, psi0, tlist, [], [num(self.osc_size)])
+            exp_list.append(result.expect[0])
+        return exp_list
+
+
+class MultiAnalysis(FullSpectrum):
+    """Compare multiple molecules and calculate spectra.
+
+    Parameters:
+        viblist: List of Path and name of the datafiles to be read
+    """
+
+    def __init__(self, viblist):
+        col = ['r', 'g', 'b']
+        for i, vibname in enumerate(viblist):
+            print(vibname)
+            self.vib_array = read_vibration(vibname)
+            self.plot_vib(col[i])
+        xlim([1300, 1700])
+        xlabel('Frequency [cm$^{-1}$]')
+        ylabel('Transition moment')
+        tight_layout()
+        savefig('multi_spectrum.pdf')
+        show()
+
+    def plot_vib(self, col='r'):
+        """Plot vibrational sepctra"""
+        n_modes = self.vib_array.shape[0]
+        scale = 1  # / max(self.vib_array[:,1]**2)
+        ticklist = []
+        # figure(figsize=(15,10))
+        for i in range(n_modes):
+            freq = self.vib_array[i, 0]
+            d = self.vib_array[i, 1] * scale
+            plot([freq, freq], [0, d], col, linewidth=4)
+
+
+if __name__ == '__main__':
+    viblist = [DATAPATH + 'amino.txt', DATAPATH + 'amino_1deut.txt']  # , 'amino_2deut.txt']
+    MultiAnalysis(viblist)
+    # FullSpectrum()
+    DynamicSim(vibname=DATAPATH + 'cyano_modes.txt', pdfname='absorption_cyano_spin.pdf', points=no_points)
+    # DynamicSim(vibname='ani_modes.txt',pdfname='absorption_ani_spin.pdf',points=no_points,mass=93.+40)
